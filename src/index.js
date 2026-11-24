@@ -1,14 +1,15 @@
 import app from './app.js'
 import { testConnection } from './db.js'
+import { logger } from './logger.js'
 
 const PORT = process.env.PORT || 3000
 
 app.listen(PORT, async () => {
-  console.log(`后端已启动：http://localhost:${PORT}`)
+  logger.info({ event: 'server_start', port: Number(PORT) })
   try {
     await testConnection()
-    console.log('MySQL 连接成功')
+    logger.info({ event: 'db_connected' })
   } catch (e) {
-    console.error('MySQL 连接失败：', e.message)
+    logger.error({ event: 'db_connect_failed' }, e)
   }
 })

@@ -202,6 +202,69 @@ describe('安全响应头与限流', () => {
       res.headers.get('x-ratelimit-limit')
     assert.ok(header, '应返回 RateLimit 相关响应头')
   })
+
+  test('读写限流额度不同', async () => {
+    const read = await fetch(base + '/api/users?limit=1')
+    const write = await fetch(base + '/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '限流额度测试' }),
+    })
+    // 这条记录也要登记，after 钩子才删得干净
+    const created = await write.json().catch(() => null)
+    if (created?.id) createdIds.push(created.id)
+    // draft-8 的额度在 RateLimit-Policy 里：'"600-in-1min"; q=600; w=60; ...'
+    const quotaOf = (r) => Number(/q=(\d+)/.exec(r.headers.get('ratelimit-policy') || '')?.[1])
+    assert.equal(quotaOf(read), 600)
+    assert.equal(quotaOf(write), 120)
+  })
+})
+
+describe('CORS 白名单', () => {
+  test('白名单内的 Origin 拿到对应 CORS 头', async () => {
+    const res = await fetch(base + '/api/users?limit=1', {
+      headers: { Origin: 'http://localhost:5173' },
+    })
+    assert.equal(res.headers.get('access-control-allow-origin'), 'http://localhost:5173')
+  })
+
+  test('陌生 Origin 拿不到 CORS 头', async () => {
+    const res = await fetch(base + '/api/users?limit=1', {
+      headers: { Origin: 'https://evil.example.com' },
+    })
+    assert.equal(res.headers.get('access-control-allow-origin'), null)
+    // 请求本身照常返回数据，是浏览器负责拦截
+    assert.equal(res.status, 200)
+  })
+
+  test('没有 Origin 的请求不受限制（curl / 同源）', async () => {
+    const res = await fetch(base + '/api/hello')
+    assert.equal(res.status, 200)
+  })
+})
+
+describe('邮箱唯一性', () => {
+  test('重复 email 返回 409 而不是 500', async () => {
+    const email = `dup_${Date.now()}@example.com`
+    const first = await api('/api/users', json('POST', { name: '第一个', email }))
+    assert.equal(first.status, 201)
+    createdIds.push(first.body.id)
+
+    const second = await api('/api/users', json('POST', { name: '第二个', email }))
+    assert.equal(second.status, 409)
+    assert.match(second.body.message, /邮箱/)
+
+    const third = await api(`/api/users/${first.body.id}`, json('PUT', { email }))
+    assert.equal(third.status, 200, '改成自己的邮箱不算重复')
+  })
+
+  test('多个空 email 可以共存（NULL 不参与唯一约束）', async () => {
+    const a = await api('/api/users', json('POST', { name: '空邮箱A' }))
+    const b = await api('/api/users', json('POST', { name: '空邮箱B' }))
+    assert.equal(a.status, 201)
+    assert.equal(b.status, 201)
+    createdIds.push(a.body.id, b.body.id)
+  })
 })
 
 describe('统计与 404', () => {

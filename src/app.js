@@ -4,25 +4,67 @@ import cors from 'cors'
 import helmet from 'helmet'
 import { rateLimit } from 'express-rate-limit'
 import { pool, testConnection } from './db.js'
+import { logger } from './logger.js'
 
 const app = express()
+// 不暴露技术栈信息
+app.disable('x-powered-by')
 
 // 纯 JSON API，不需要 CSP 和跨域资源策略；其余安全响应头保留
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }))
-app.use(cors())
-app.use(express.json({ limit: '100kb' }))
 
-// 限流：同一 IP 每分钟 300 次，避免被脚本刷爆
+// CORS 白名单：由 CORS_ORIGIN 控制（逗号分隔多个），默认只放行本地开发前端。
+// 没有 Origin 的请求（curl、同源、服务端调用）不受影响。
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || 'http://localhost:5173,http://127.0.0.1:5173')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean)
+
 app.use(
-  '/api',
-  rateLimit({
-    windowMs: 60 * 1000,
-    limit: 300,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    message: { message: '请求太频繁，请稍后重试' },
+  cors({
+    origin(origin, callback) {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) return callback(null, true)
+      // 不抛错、也不返回 CORS 头，让浏览器自己拦掉
+      logger.warn({ event: 'cors_blocked', origin })
+      return callback(null, false)
+    },
+    optionsSuccessStatus: 204,
   })
 )
+
+app.use(express.json({ limit: '100kb' }))
+
+// 结构化访问日志：每行一个 JSON，含方法、路径、状态码、耗时
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint()
+  res.on('finish', () => {
+    logger.info({
+      event: 'http',
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      ms: Number((process.hrtime.bigint() - start) / 1_000_000n),
+      ip: req.ip,
+    })
+  })
+  next()
+})
+
+// 限流拆成两档：读接口宽松（600 次/分钟），写接口收紧（120 次/分钟）
+const limitOptions = (limit) => ({
+  windowMs: 60 * 1000,
+  limit,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { message: '请求太频繁，请稍后重试' },
+})
+const readLimiter = rateLimit(limitOptions(600))
+const writeLimiter = rateLimit(limitOptions(120))
+
+app.use('/api', (req, res, next) => {
+  const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS'
+  return (isRead ? readLimiter : writeLimiter)(req, res, next)
+})
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MAX_NAME = 50
@@ -52,13 +94,18 @@ function escapeLike(input) {
   return input.replace(/[\\%_]/g, (c) => `\\${c}`)
 }
 
+// 唯一索引冲突（email 重复）翻译成 409，而不是笼统的 500
+function isDuplicateEmail(e) {
+  return e?.code === 'ER_DUP_ENTRY' || /Duplicate entry/i.test(e?.message || '')
+}
+
 // 健康检查：同时检查 MySQL 是否连通
 app.get('/api/hello', async (req, res) => {
   try {
     await testConnection()
     res.json({ message: '后端连通成功（Express + MySQL）', db: 'ok' })
   } catch (e) {
-    console.error('[db] 健康检查失败：', e.message)
+    logger.error({ event: 'health_db_down' }, e)
     res.status(500).json({ message: '后端在线但数据库连不上', db: 'down' })
   }
 })
@@ -109,10 +156,16 @@ app.post('/api/users', async (req, res, next) => {
     const mail = normalizeEmail(email)
     if (mail.error) return res.status(400).json({ message: mail.error })
 
-    const [result] = await pool.query('INSERT INTO users (name, email) VALUES (?, ?)', [
-      nameCheck.value,
-      mail.value ?? null,
-    ])
+    let result
+    try {
+      ;[result] = await pool.query('INSERT INTO users (name, email) VALUES (?, ?)', [
+        nameCheck.value,
+        mail.value ?? null,
+      ])
+    } catch (e) {
+      if (isDuplicateEmail(e)) return res.status(409).json({ message: '这个邮箱已经被使用' })
+      throw e
+    }
     // 回读完整行，保证 POST 与 GET 的字段一致（含 created_at / updated_at）
     const [rows] = await pool.query(
       'SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?',
@@ -150,12 +203,19 @@ app.put('/api/users/:id', async (req, res, next) => {
     }
     params.push(req.params.id)
 
-    const [result] = await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params)
+    let result
+    try {
+      ;[result] = await pool.query(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`, params)
+    } catch (e) {
+      if (isDuplicateEmail(e)) return res.status(409).json({ message: '这个邮箱已经被使用' })
+      throw e
+    }
     if (result.affectedRows === 0) return res.status(404).json({ message: '用户不存在' })
 
-    const [rows] = await pool.query('SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?', [
-      req.params.id,
-    ])
+    const [rows] = await pool.query(
+      'SELECT id, name, email, created_at, updated_at FROM users WHERE id = ?',
+      [req.params.id]
+    )
     res.json(rows[0])
   } catch (e) {
     next(e)
@@ -199,7 +259,7 @@ app.use((err, req, res, _next) => {
   if (err.type === 'entity.parse.failed' || (err instanceof SyntaxError && err.status === 400)) {
     return res.status(400).json({ message: '请求体必须是合法 JSON' })
   }
-  console.error('[未捕获异常]', err)
+  logger.error({ event: 'unhandled_error', method: req.method, path: req.originalUrl }, err)
   res.status(500).json({ message: '服务器内部错误' })
 })
 
