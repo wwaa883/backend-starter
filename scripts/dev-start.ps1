@@ -87,11 +87,9 @@ Write-Host ("  前端页面: " + $(if (Test-Port 5173) { 'http://localhost:5173'
 Write-Host ''
 
 if ($apiOk -and -not $NoBrowser) {
-  # 交给 cmd 的 start 打开默认浏览器，cmd 立刻退出，不会把终端输出句柄挂住
+  # 交给 cmd 的 start 打开默认浏览器；cmd 立刻退出，不重定向输出（重定向同一文件会直接报错）
   try {
-    $log = Join-Path $env:TEMP 'dev-start-browser.log'
-    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '', 'http://localhost:5173' `
-      -RedirectStandardOutput $log -RedirectStandardError $log -WindowStyle Hidden
+    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '', 'http://localhost:5173' -WindowStyle Hidden
   } catch {
     Write-Host '[!] 自动打开浏览器失败，手动访问 http://localhost:5173' -ForegroundColor Yellow
   }
