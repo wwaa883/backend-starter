@@ -77,6 +77,11 @@ pwsh -File scripts\dev-start.ps1            # 加 -NoBrowser 只起服务不开�
 `{"time":"...","level":"info","event":"http","method":"GET","path":"/api/users","status":200,"ms":12,"ip":"::1"}`，
 错误带 `errMsg` / `errCode` / `stack` 前几行。
 
+## 部署相关
+
+- **优雅退出**：`Ctrl+C` 或容器 `stop` 时先停止接收新请求、再关闭连接池，5 秒内没退完强制结束；`unhandledRejection` / `uncaughtException` 也会写进日志再退，不会静默挂掉。
+- **前面的代理**：只有挂了 Nginx / 负载均衡才需要配 `TRUST_PROXY`（数字表示信任的跳数），配了限流才会按真实客户端 IP 算；直连部署不要配，否则客户端能伪造 `X-Forwarded-For` 绕过限流。
+
 ## 用 Docker 起整套环境
 
 `docker-compose.yml` 里包含 MySQL 8.4 和本服务：
@@ -98,7 +103,7 @@ docker compose down -v           # 连数据卷一起清掉
 - `test/api.test.js` —— 26 个接口测试用例（CRUD、搜索分页、参数校验、emoji 长度、安全头、读写两档限流额度、CORS 白名单、邮箱唯一性、404）
 - `scripts/dev-start.ps1` —— 一键启动脚本
 - `.env.example` —— 配置模板
-- `Dockerfile` / `docker-compose.yml` / `docker/mysql/initdb/` —— 容器化运行
+- `Dockerfile` / `docker-compose.yml` / `docker/mysql/initdb/` —— 容器化运行（镜像用 `npm ci --omit=dev` 装依赖、以 `node` 非 root 用户跑）
 - `.github/workflows/ci.yml` —— CI：MySQL service + lint + 格式检查 + 建表 + 测试
 - `.github/dependabot.yml` —— 每周自动提依赖升级 PR
 - `.editorconfig` / `.gitattributes` / `.prettierignore` —— 编辑风格与换行符统一

@@ -10,6 +10,13 @@ const app = express()
 // 不暴露技术栈信息
 app.disable('x-powered-by')
 
+// 部署在反向代理/容器前面时才开：让 req.ip 取真实客户端 IP，限流才按人算。
+// 默认关闭，避免客户端自己伪造 X-Forwarded-For 绕过限流。数字表示信任的跳数，也可以是 'loopback' 等。
+if (process.env.TRUST_PROXY) {
+  const raw = process.env.TRUST_PROXY.trim()
+  app.set('trust proxy', /^\d+$/.test(raw) ? Number(raw) : raw)
+}
+
 // 纯 JSON API，不需要 CSP 和跨域资源策略；其余安全响应头保留
 app.use(helmet({ contentSecurityPolicy: false, crossOriginResourcePolicy: false }))
 
